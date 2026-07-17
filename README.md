@@ -40,6 +40,8 @@ You can also try the **online interactive demo** here:
 
 
 ## 🚀 News
+- **[2026-07-17]** We have released the [training code](https://github.com/Soul-AILab/SoulX-Duplug/tree/training-code) for SoulX-Duplug. This is a re-implemented version of our training pipeline, and you can use it to train the model from scratch or fine-tune it on your own data.
+- **[2026-07-17]** Demo Notice: The online demo is temporarily unavailable. Please follow the deployment instructions in this repository if you would like to try SoulX-Duplug locally.
 - **[2026-03-17]** Our paper on this project has been published! You can read it here: [SoulX-Duplug](https://arxiv.org/abs/2603.14877).
 - **[2026-03-16]** SoulX-Duplug checkpoint and SoulX-Duplug-Eval are now available on Hugging Face! You can access it directly from [SoulX-Duplug-HF](https://huggingface.co/collections/Soul-AILab/soulx-duplug).
 
@@ -151,6 +153,7 @@ We implemented a demo full-duplex spoken dialogue system based on SoulX-Duplug. 
 ## 📌 TODOs
 - [x] Publish the technical report.
 - [x] Release evaluation scripts.
+- [x] Release training scripts.
 
 
 ## 🔖 Citation
