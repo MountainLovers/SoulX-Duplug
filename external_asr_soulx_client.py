@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -60,6 +61,7 @@ class AsrTextTracker:
         self.last_partial = ""
         self.last_sentence_end = False
         self.response_count = 0
+        self.consumed_norm_prefix = ""
         self._lock = asyncio.Lock()
 
     async def update(self, text: str, sentence_end: bool) -> str:
@@ -77,10 +79,100 @@ class AsrTextTracker:
         async with self._lock:
             return self._text_unlocked(), self.last_sentence_end, self.response_count
 
+    async def pending_snapshot(self) -> tuple[str, bool, int]:
+        async with self._lock:
+            return (
+                self._pending_text_unlocked(),
+                self.last_sentence_end,
+                self.response_count,
+            )
+
+    async def consume(self, text: str) -> None:
+        consume_norm = normalize_asr_prefix(text)
+        if not consume_norm:
+            return
+
+        async with self._lock:
+            pending_text = self._pending_text_unlocked()
+            pending_norm = normalize_asr_prefix(pending_text)
+            if pending_norm.startswith(consume_norm):
+                self.consumed_norm_prefix += consume_norm
+                return
+
+            if consume_norm.startswith(pending_norm) and pending_norm:
+                self.consumed_norm_prefix += pending_norm
+                return
+
+            full_norm = normalize_asr_prefix(self._text_unlocked())
+            candidate = self.consumed_norm_prefix + consume_norm
+            if full_norm.startswith(candidate):
+                self.consumed_norm_prefix = candidate
+                return
+
+            consume_at = pending_norm.find(consume_norm)
+            if consume_at >= 0:
+                self.consumed_norm_prefix += pending_norm[
+                    : consume_at + len(consume_norm)
+                ]
+
     def _text_unlocked(self) -> str:
         if self.last_partial:
             return "".join(self.final_sentences + [self.last_partial])
         return "".join(self.final_sentences)
+
+    def _pending_text_unlocked(self) -> str:
+        text = self._text_unlocked()
+        full_norm = normalize_asr_prefix(text)
+        if self.consumed_norm_prefix.startswith(full_norm):
+            return ""
+
+        consumed_index = raw_index_after_normalized_prefix(
+            text,
+            self.consumed_norm_prefix,
+        )
+        if consumed_index is None:
+            return text
+        return lstrip_asr_separators(text[consumed_index:])
+
+
+def normalize_asr_prefix(text: str) -> str:
+    pieces = []
+    for char in unicodedata.normalize("NFKC", text):
+        if char.isspace():
+            continue
+        category = unicodedata.category(char)
+        if category[0] in {"P", "Z"}:
+            continue
+        pieces.append(char.lower())
+    return "".join(pieces)
+
+
+def lstrip_asr_separators(text: str) -> str:
+    for index, char in enumerate(text):
+        if char.isspace():
+            continue
+        category = unicodedata.category(char)
+        if category[0] in {"P", "Z"}:
+            continue
+        return text[index:]
+    return ""
+
+
+def raw_index_after_normalized_prefix(text: str, norm_prefix: str) -> int | None:
+    if not norm_prefix:
+        return 0
+
+    normalized = ""
+    for index, char in enumerate(text):
+        piece = normalize_asr_prefix(char)
+        if not piece:
+            continue
+        normalized += piece
+        if not norm_prefix.startswith(normalized):
+            return None
+        if len(normalized) >= len(norm_prefix):
+            return index + 1
+    return None
 
 
 def load_audio(path: str, target_sample_rate: int) -> AudioData:
@@ -313,6 +405,7 @@ async def asr_receive_loop(
 async def soulx_receive_loop(
     ws: Any,
     stop_event: asyncio.Event,
+    tracker: AsrTextTracker,
     show_raw_state: bool,
     show_json: bool,
 ) -> None:
@@ -333,6 +426,11 @@ async def soulx_receive_loop(
         if data is None:
             print(f"[{prefix}] soulx non-json response: {message!r}")
             continue
+        state = data.get("state")
+        if isinstance(state, dict) and state.get("state") == "speak":
+            text = state.get("text")
+            if isinstance(text, str):
+                await tracker.consume(text)
         print(f"[{prefix}] soulx {format_soulx_state(data, show_raw_state, show_json)}")
 
 
@@ -402,7 +500,7 @@ async def send_soulx_audio_loop(
     stream_start = loop.time()
 
     for chunk in iter_fixed_chunks(audio, chunk_size):
-        asr_text, asr_final, asr_responses = await tracker.snapshot()
+        asr_text, asr_final, asr_responses = await tracker.pending_snapshot()
         payload = {
             "type": "audio",
             "session_id": session_id,
@@ -492,6 +590,7 @@ async def stream_to_asr_and_soulx(args: argparse.Namespace) -> None:
             soulx_receive_loop(
                 soulx_ws,
                 soulx_stop,
+                tracker,
                 args.show_raw_state,
                 args.json,
             ),
@@ -551,7 +650,7 @@ async def stream_to_asr_and_soulx(args: argparse.Namespace) -> None:
                 end_at = loop.time() + args.final_asr_flush_sec
                 last_text = None
                 while loop.time() < end_at:
-                    asr_text, asr_final, _ = await tracker.snapshot()
+                    asr_text, asr_final, _ = await tracker.pending_snapshot()
                     if asr_text and asr_text != last_text:
                         payload = {
                             "type": "audio",
