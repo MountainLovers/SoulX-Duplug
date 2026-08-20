@@ -138,7 +138,7 @@ def collect_nvidia(report: Report) -> None:
     nvidia_smi = run_cmd(
         [
             "nvidia-smi",
-            "--query-gpu=name,driver_version,cuda_version,memory.total,compute_cap",
+            "--query-gpu=name,driver_version,memory.total",
             "--format=csv,noheader",
         ]
     )
@@ -153,7 +153,31 @@ def collect_nvidia(report: Report) -> None:
         return
 
     if nvidia_smi["returncode"] != 0:
-        report.fail("nvidia-smi", "nvidia-smi exists but failed.", nvidia_smi["stderr"])
+        fallback = run_cmd(["nvidia-smi"])
+        report.facts["nvidia_smi_fallback"] = fallback
+        if fallback["returncode"] != 0:
+            report.fail("nvidia-smi", "nvidia-smi exists but failed.", nvidia_smi["stderr"])
+            return
+
+        output = fallback["stdout"]
+        driver_version = first_match(r"Driver Version:\s*([0-9.]+)", output)
+        cuda_version = first_match(r"CUDA Version:\s*([0-9.]+)", output)
+        gpu_rows = re.findall(r"\|\s+\d+\s+(.+?)\s{2,}On\s+\|", output)
+        if not gpu_rows:
+            gpu_rows = re.findall(r"\|\s+\d+\s+(.+?)\s{2,}(?:Off|On)\s+\|", output)
+
+        report.facts["nvidia_driver_version"] = driver_version
+        report.facts["driver_supported_cuda"] = cuda_version
+        report.facts["gpus_from_nvidia_smi"] = gpu_rows
+        report.warn(
+            "nvidia-smi query",
+            "Structured nvidia-smi query failed, but plain nvidia-smi works.",
+            nvidia_smi["stderr"] or "Some nvidia-smi versions do not support every --query-gpu field.",
+        )
+        if gpu_rows:
+            report.ok("NVIDIA GPU", f"nvidia-smi sees {len(gpu_rows)} GPU(s).", "\n".join(gpu_rows))
+        else:
+            report.ok("NVIDIA GPU", "plain nvidia-smi works; GPU table parsing was skipped.")
         return
 
     rows = [line.strip() for line in nvidia_smi["stdout"].splitlines() if line.strip()]
@@ -164,10 +188,13 @@ def collect_nvidia(report: Report) -> None:
 
     report.ok("NVIDIA GPU", f"nvidia-smi sees {len(rows)} GPU(s).", "\n".join(rows))
 
-    driver_version = first_match(r",\s*([0-9.]+)\s*,", rows[0])
-    cuda_version = first_match(r",\s*[0-9.]+\s*,\s*([0-9.]+)\s*,", rows[0])
+    driver_version = rows[0].split(",")[1].strip() if len(rows[0].split(",")) >= 2 else None
     report.facts["nvidia_driver_version"] = driver_version
-    report.facts["driver_supported_cuda"] = cuda_version
+
+    plain = run_cmd(["nvidia-smi"])
+    report.facts["nvidia_smi_plain"] = plain
+    if plain["returncode"] == 0:
+        report.facts["driver_supported_cuda"] = first_match(r"CUDA Version:\s*([0-9.]+)", plain["stdout"])
 
 
 def collect_cuda_toolkit(report: Report) -> None:
@@ -312,10 +339,10 @@ def collect_torch(report: Report) -> None:
     torch_cuda = parse_version_tuple(compiled_cuda)
     if driver_supported_cuda and torch_cuda:
         if version_gt(torch_cuda, driver_supported_cuda):
-            report.fail(
+            report.warn(
                 "Driver/runtime compatibility",
-                f"PyTorch CUDA {compiled_cuda} is newer than driver-supported CUDA {report.facts.get('driver_supported_cuda')}.",
-                "Upgrade the NVIDIA driver or install a PyTorch build with an older CUDA runtime.",
+                f"PyTorch CUDA {compiled_cuda} is newer than the CUDA version shown by nvidia-smi ({report.facts.get('driver_supported_cuda')}).",
+                "This can still work through CUDA minor-version compatibility or container compatibility libraries. The GPU smoke test below is the deciding runtime check.",
             )
         else:
             report.ok(
