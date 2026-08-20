@@ -491,12 +491,17 @@ async def send_soulx_audio_loop(
     sample_rate: int,
     chunk_size: int,
     send_interval: float,
+    initial_delay_sec: float,
     session_id: str,
     tracker: AsrTextTracker,
     show_send: bool,
 ) -> int:
     chunks_sent = 0
     loop = asyncio.get_running_loop()
+
+    if initial_delay_sec > 0:
+        await asyncio.sleep(initial_delay_sec)
+
     stream_start = loop.time()
 
     for chunk in iter_fixed_chunks(audio, chunk_size):
@@ -541,6 +546,7 @@ async def stream_to_asr_and_soulx(args: argparse.Namespace) -> None:
         if args.send_interval_sec is not None
         else soulx_chunk_size / audio_data.sample_rate
     )
+    soulx_audio_delay_sec = args.soulx_audio_delay_ms / 1000.0
 
     print(f"audio: {args.audio}")
     print(
@@ -553,6 +559,7 @@ async def stream_to_asr_and_soulx(args: argparse.Namespace) -> None:
         f"chunk_size={soulx_chunk_size}"
     )
     print(f"send_interval={send_interval:.3f}s realtime={args.send_interval_sec is None}")
+    print(f"soulx_audio_delay={soulx_audio_delay_sec:.3f}s")
 
     asr_started = asyncio.Event()
     asr_finished = asyncio.Event()
@@ -624,6 +631,7 @@ async def stream_to_asr_and_soulx(args: argparse.Namespace) -> None:
                     audio_data.sample_rate,
                     soulx_chunk_size,
                     0.0 if args.no_realtime else send_interval,
+                    soulx_audio_delay_sec,
                     soulx_session_id,
                     tracker,
                     args.show_send,
@@ -724,6 +732,17 @@ def parse_args() -> argparse.Namespace:
         help="Override send interval. Default sends SoulX chunks at audio realtime speed.",
     )
     parser.add_argument(
+        "--soulx-audio-delay-ms",
+        "--audio-delay-ms",
+        dest="soulx_audio_delay_ms",
+        type=float,
+        default=0.0,
+        help=(
+            "Delay SoulX audio sending by N milliseconds so ASR has a head start. "
+            "This approximates ASR latency alignment."
+        ),
+    )
+    parser.add_argument(
         "--no-realtime",
         action="store_true",
         help="Send ASR and SoulX chunks as fast as possible.",
@@ -791,6 +810,8 @@ def main() -> None:
         raise SystemExit("--asr-chunk-ms must be > 0")
     if args.soulx_chunk_size <= 0:
         raise SystemExit("--soulx-chunk-size must be > 0")
+    if args.soulx_audio_delay_ms < 0:
+        raise SystemExit("--soulx-audio-delay-ms must be >= 0")
 
     try:
         asyncio.run(stream_to_asr_and_soulx(args))
