@@ -70,6 +70,11 @@ async def turn_ws(ws: WebSocket):
                 continue
 
             session_id = data["session_id"]
+            asr_text = data.get("asr_text")
+            asr_final = bool(data.get("asr_final", False))
+
+            if asr_text is not None and not isinstance(asr_text, str):
+                asr_text = str(asr_text)
 
             if session_id not in sessions:
                 engine = TurnTakingEngine(model=ws.app.state.model)
@@ -84,7 +89,11 @@ async def turn_ws(ws: WebSocket):
             except Exception:
                 continue
 
-            state = session.feed_audio(audio)
+            state = session.feed_audio(
+                audio,
+                asr_text=asr_text,
+                asr_final=asr_final,
+            )
 
             if state is not None:
                 await ws.send_text(

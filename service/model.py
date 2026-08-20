@@ -60,15 +60,25 @@ class TurnModel:
         else:
             self.embed_tokens_func = self.model.llm.model.model.model.embed_tokens
 
-        # if self.config.model_config.enable_cascade_asr:
-        from model.asr import ParaformerASR, SensevoiceASR
-
-        if config.infer_config.asr.model_name == "paraformer":
-            self.cascade_asr = ParaformerASR()
-        else:
-            self.cascade_asr = SensevoiceASR(
-                language=config.infer_config.asr.get("language", "auto")
+        self.asr_mode = str(config.infer_config.asr.get("mode", "cascade")).lower()
+        if self.asr_mode not in {"cascade", "external", "auto"}:
+            raise ValueError(
+                "infer_config.asr.mode must be one of: cascade, external, auto"
             )
+
+        self.cascade_asr = None
+        if self.asr_mode in {"cascade", "auto"}:
+            from model.asr import ParaformerASR, SensevoiceASR
+
+            if config.infer_config.asr.model_name == "paraformer":
+                self.cascade_asr = ParaformerASR(device=self.device)
+            else:
+                self.cascade_asr = SensevoiceASR(
+                    language=config.infer_config.asr.get("language", "auto"),
+                    device=self.device,
+                )
+        else:
+            print("[DuplexServer] external ASR mode enabled; cascade ASR disabled.")
 
         print("[DuplexServer] Model loaded successfully.")
 
@@ -127,6 +137,8 @@ class TurnModel:
         self.history_chunks = []
         self.wait_idle_cnt = 0
         self.monitoring_wait_silence = False
+        self.external_asr_text = ""
+        self.external_asr_final = False
 
     def clear_turn(self):
         self.buffer_for_asr = np.random.randn(int(1.6 * self.sampling_rate)) * 0.00001
@@ -168,6 +180,8 @@ class TurnModel:
             "history_chunks": self.history_chunks,
             "wait_idle_cnt": self.wait_idle_cnt,
             "monitoring_wait_silence": self.monitoring_wait_silence,
+            "external_asr_text": self.external_asr_text,
+            "external_asr_final": self.external_asr_final,
         }
 
     def restore_runtime(self, state):
@@ -182,6 +196,8 @@ class TurnModel:
         self.history_chunks = state.get("history_chunks", [])
         self.wait_idle_cnt = state.get("wait_idle_cnt", 0)
         self.monitoring_wait_silence = state.get("monitoring_wait_silence", False)
+        self.external_asr_text = state.get("external_asr_text", "")
+        self.external_asr_final = state.get("external_asr_final", False)
 
     def get_chunk(self):
         if (
@@ -213,15 +229,19 @@ class TurnModel:
 
         return False, None, None, None
 
-    def process(self, audio_chunk):
+    def process(self, audio_chunk, asr_text=None, asr_final=False):
         """Process audio chunk, return predict state."""
         assert audio_chunk.dtype == np.float32
+        if asr_text is not None:
+            self.external_asr_text = self._normalize_external_asr_text(asr_text)
+        self.external_asr_final = bool(asr_final)
         # print(audio_chunk.shape)
         self.buffer = np.concatenate([self.buffer, audio_chunk])
         delta_text = ""
         asr_buffer = ""
         predicted_state = {
             "state": "blank",
+            "raw_state": "",
             "asr_segment": delta_text,
             "asr_buffer": asr_buffer,
         }
@@ -230,14 +250,31 @@ class TurnModel:
 
         if start_prediction:
             t_start = time.time()
-            predicted_state = self.state_predict(process_chunk, audio_back, audio_ahead)
+            predicted_state = self.state_predict(
+                process_chunk,
+                audio_back,
+                audio_ahead,
+                asr_text=self.external_asr_text,
+                asr_final=self.external_asr_final,
+            )
             self._log(f"[Timing] Total chunk: {time.time() - t_start:.4f}s\n\n")
 
         return predicted_state
 
-    def state_predict(self, process_chunk, audio_back, audio_ahead):
+    def state_predict(
+        self,
+        process_chunk,
+        audio_back,
+        audio_ahead,
+        asr_text=None,
+        asr_final=False,
+    ):
         state, delta_text, asr_buffer = self.infer(
-            process_chunk, audio_back, audio_ahead
+            process_chunk,
+            audio_back,
+            audio_ahead,
+            asr_text=asr_text,
+            asr_final=asr_final,
         )
 
         if (
@@ -250,6 +287,7 @@ class TurnModel:
             self.reset()
             return {
                 "state": "idle",
+                "raw_state": state,
                 "asr_segment": "",
                 "asr_buffer": "",
             }
@@ -268,13 +306,16 @@ class TurnModel:
                 if self.wait_idle_cnt >= self.config.infer_config["max_wait_num"]:
                     self._log("Continuous silence after wait, triggering reply")
                     if self.speech_detected:
-                        segment = self.cascade_asr.recognize(
-                            self.buffer_for_asr, self.sampling_rate
+                        segment = self._recognize_turn_text(
+                            self.buffer_for_asr,
+                            self.sampling_rate,
+                            asr_text=asr_text,
                         )
                         # self.clear_turn()
                         self.reset()
                         return {
                             "state": "speak",
+                            "raw_state": state,
                             "text": segment,
                             "asr_segment": delta_text,
                             "asr_buffer": asr_buffer,
@@ -322,6 +363,7 @@ class TurnModel:
                 )
             return {
                 "state": "nonidle",
+                "raw_state": state,
                 "asr_segment": delta_text,
                 "asr_buffer": asr_buffer,
             }
@@ -332,6 +374,12 @@ class TurnModel:
                 self.reset()
             if self.monitoring_wait_silence:
                 self.wait_idle_cnt = 1
+            return {
+                "state": "backchannel",
+                "raw_state": state,
+                "asr_segment": delta_text,
+                "asr_buffer": asr_buffer,
+            }
 
         elif state == "<|user_complete|>":
             self._log("User finished speaking, should reply now")
@@ -339,13 +387,16 @@ class TurnModel:
                 self.buffer_for_asr = np.concatenate(
                     [self.buffer_for_asr, process_chunk]
                 )
-                segment = self.cascade_asr.recognize(
-                    self.buffer_for_asr, self.sampling_rate
+                segment = self._recognize_turn_text(
+                    self.buffer_for_asr,
+                    self.sampling_rate,
+                    asr_text=asr_text,
                 )
                 # self.clear_turn()
                 self.reset()
                 return {
                     "state": "speak",
+                    "raw_state": state,
                     "text": segment,
                     "asr_segment": delta_text,
                     "asr_buffer": asr_buffer,
@@ -359,6 +410,12 @@ class TurnModel:
             self.monitoring_wait_silence = True
             self.wait_idle_cnt = 0
             self.buffer_for_asr = np.concatenate([self.buffer_for_asr, process_chunk])
+            return {
+                "state": "incomplete",
+                "raw_state": state,
+                "asr_segment": delta_text,
+                "asr_buffer": asr_buffer,
+            }
 
         else:
             self._log("Unknown state")
@@ -366,12 +423,20 @@ class TurnModel:
 
         return {
             "state": "idle",
+            "raw_state": state,
             "asr_segment": delta_text,
             "asr_buffer": asr_buffer,
         }
 
     @torch.no_grad()
-    def infer(self, audio_chunk, audio_back, audio_ahead):
+    def infer(
+        self,
+        audio_chunk,
+        audio_back,
+        audio_ahead,
+        asr_text=None,
+        asr_final=False,
+    ):
         self.cascade_buffer = np.concatenate([self.cascade_buffer, audio_chunk])
 
         # init
@@ -395,12 +460,13 @@ class TurnModel:
             (self.past_state["input_embeds"], audio_embeds), dim=0
         ).unsqueeze(0)
 
-        delta_text = self._asr(audio_embeds)
+        delta_text = self._asr(audio_embeds, asr_text=asr_text)
 
         state = self._state_predict(delta_text)
 
         del audio_embeds
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return state, delta_text, self.past_state["cascade_text"]
 
     def _audio_to_tokens(
@@ -476,7 +542,54 @@ class TurnModel:
 
         return embeds
 
-    def _asr(self, audio_embeds):
+    def _normalize_external_asr_text(self, asr_text):
+        if asr_text is None:
+            return None
+        return remove_leading_backchannel(str(asr_text).strip())
+
+    def _choose_full_asr_text(self, asr_text=None):
+        external_text = self._normalize_external_asr_text(asr_text)
+        external_available = asr_text is not None or bool(self.external_asr_text)
+
+        if external_text is not None:
+            self.external_asr_text = external_text
+
+        if self.asr_mode == "external":
+            return self.external_asr_text
+
+        if self.asr_mode == "auto" and external_available:
+            return self.external_asr_text
+
+        if self.cascade_asr is None:
+            return self.past_state.get("cascade_text", "") if self.past_state else ""
+
+        return remove_leading_backchannel(
+            self.cascade_asr.recognize(self.cascade_buffer, self.sampling_rate)
+        )
+
+    def _recognize_turn_text(self, audio_chunk, sample_rate=16000, asr_text=None):
+        external_text = self._normalize_external_asr_text(asr_text)
+        external_available = asr_text is not None or bool(self.external_asr_text)
+
+        if external_text is not None:
+            self.external_asr_text = external_text
+
+        if self.asr_mode == "external":
+            return self.external_asr_text or (
+                self.past_state.get("cascade_text", "") if self.past_state else ""
+            )
+
+        if self.asr_mode == "auto" and external_available:
+            return self.external_asr_text or (
+                self.past_state.get("cascade_text", "") if self.past_state else ""
+            )
+
+        if self.cascade_asr is None:
+            return self.past_state.get("cascade_text", "") if self.past_state else ""
+
+        return self.cascade_asr.recognize(audio_chunk, sample_rate)
+
+    def _asr(self, audio_embeds, asr_text=None):
         # 1. Run model to see if it predicts speech (1 step)
         t_llm_check = time.time()
         with torch.no_grad():
@@ -497,10 +610,10 @@ class TurnModel:
             if pred != self.model.asr_eos_token_id:
                 # Speech detected -> Cascade ASR
                 t_asr = time.time()
-                full_text = remove_leading_backchannel(
-                    self.cascade_asr.recognize(self.cascade_buffer, self.sampling_rate)
+                full_text = self._choose_full_asr_text(asr_text=asr_text)
+                self._log(
+                    f"[Timing] ASR text source ({self.asr_mode}): {time.time() - t_asr:.4f}s"
                 )
-                self._log(f"[Timing] Cascade ASR: {time.time() - t_asr:.4f}s")
 
                 # Process Text Delta
                 history_text = self.past_state.get("cascade_text", "")
@@ -508,10 +621,10 @@ class TurnModel:
                 norm_history_text = split_cn_en(
                     zh_norm(zh_remove_punc(history_text.strip()))
                 )
+                backup_norm_full_text = norm_full_text.copy()
+                backup_norm_history_text = norm_history_text.copy()
 
                 if len(norm_full_text) >= 5 and len(norm_history_text) >= 5:
-                    backup_norm_full_text = norm_full_text.copy()
-                    backup_norm_history_text = norm_history_text.copy()
                     norm_full_text, norm_history_text = get_lcs_substrings(
                         norm_full_text, norm_history_text
                     )

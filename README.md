@@ -104,6 +104,9 @@ git clone https://huggingface.co/Soul-AILab/SoulX-Duplug-0.6B pretrained_models
 In `config/config.yaml`:
 
 - For the `infer_config.asr` field:
+    - Set `mode: external` to use ASR text supplied by the client and skip loading the built-in cascade ASR.
+    - Set `mode: cascade` to use the built-in ASR pipeline.
+    - Set `mode: auto` to prefer client-supplied ASR text and fall back to the built-in ASR when no ASR text is supplied.
     - For Chinese, we recommend using `model_name: paraformer`
     - For English, set it to `model_name: sensevoice`, `language: en`
     - For bilingual scenarios, use `model_name: sensevoice`, `language: auto`
@@ -123,11 +126,22 @@ For usage (see [example_client.py](https://github.com/Soul-AILab/SoulX-Duplug/bl
 
 - Format:
     ```python
+    # Client request:
+    {
+        "type": "audio",
+        "session_id": ,         # session_id
+        "audio": ,              # base64-encoded float32 PCM chunk
+        "asr_text": ,           # (optional) cumulative streaming ASR text for current user turn
+        "asr_final": ,          # (optional) whether the ASR text is final
+    }
+
+    # Server response:
     {
         "type": "turn_state",
         "session_id": ,         # session_id
         "state": {
-            "state": ,          # predicted state: "idle", "nonidle", "speak", or "blank"
+            "state": ,          # predicted state: "idle", "nonidle", "backchannel", "incomplete", "speak", or "blank"
+            "raw_state": ,      # (optional) raw internal model token
             "text": ,           # (optional) asr result of user's turn
             "asr_segment": ,    # (optional) asr result of current chunk
             "asr_buffer": ,     # (optional) asr result of last 3.2s
@@ -136,9 +150,13 @@ For usage (see [example_client.py](https://github.com/Soul-AILab/SoulX-Duplug/bl
     }
     ```
 
-- **"idle"** indicates that the current audio chunk contains no semantic content (e.g., silence, noise, or backchannel).
+- **"idle"** indicates that the current audio chunk contains no semantic content (e.g., silence or noise).
 
 - **"nonidle"** indicates that the current audio chunk contains semantic content. In this case, `"asr_segment"` returns the ASR result of the current chunk, and `"asr_buffer"` returns the ASR result of the accumulated audio over the past 3.2 seconds.
+
+- **"backchannel"** indicates that the current audio chunk is a backchannel response and should usually not trigger a system turn.
+
+- **"incomplete"** indicates that the user is speaking but the utterance is judged semantically incomplete, so the system should keep waiting.
 
 - **"speak"** indicates that up to the current chunk, the user is judged to have stopped speaking and the utterance is semantically complete, meaning the system can take the turn. In this case, `"asr_segment"` returns the ASR result of the current chunk, `"asr_buffer"` returns the ASR result of the accumulated audio over the past 3.2 seconds, and `"text"` returns the complete transcription of the user’s utterance for this turn. 
 

@@ -17,14 +17,14 @@ class TurnSession:
         """
         self.last_active_ts = time.time()
 
-    def feed_audio(self, audio):
+    def feed_audio(self, audio, asr_text=None, asr_final=False):
         """
         audio: np.ndarray(float32)
         """
         # Consider active every time audio is received
         self.touch()
 
-        result = self.engine.process(audio)
+        result = self.engine.process(audio, asr_text=asr_text, asr_final=asr_final)
         self.last_state = result["state"]
         return result
 

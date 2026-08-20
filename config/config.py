@@ -191,6 +191,7 @@ class InferConfig:
     )
     asr: dict = field(
         default_factory=lambda: {
+            "mode": "cascade",
             "model_name": "paraformer",
             "language": "auto",
             "max_chunk_token_length": 256,

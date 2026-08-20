@@ -15,7 +15,7 @@ class TurnTakingEngine:
         self.device = model.device
         self.contexts = None
 
-    def process(self, audio: np.ndarray):
+    def process(self, audio: np.ndarray, asr_text=None, asr_final=False):
         """
         audio: np.float32, shape [N]
         return:
@@ -26,7 +26,7 @@ class TurnTakingEngine:
         else:
             self.model.restore_runtime(self.contexts)
 
-        result = self.model.process(audio)
+        result = self.model.process(audio, asr_text=asr_text, asr_final=asr_final)
         self.contexts = self.model.snapshot_runtime()
 
         return result

@@ -5,16 +5,18 @@ import soxr
 
 
 class ParaformerASR:
-    def __init__(self):
+    def __init__(self, device="cpu"):
         from modelscope.pipelines import pipeline
         from modelscope.utils.constant import Tasks
+
+        self.device = "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
 
         try:
             self.asr_pipeline = pipeline(
                 task=Tasks.auto_speech_recognition,
                 model="iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
                 model_revision="v2.0.4",
-                device=f"cuda",
+                device=self.device,
                 disable_pbar=True,
                 disable_update=True,
             )
@@ -23,7 +25,7 @@ class ParaformerASR:
             self.asr_pipeline = pipeline(
                 task=Tasks.auto_speech_recognition,
                 model="iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-                device=f"cuda",
+                device=self.device,
                 disable_pbar=True,
                 disable_update=True,
             )
@@ -43,16 +45,17 @@ class ParaformerASR:
 
 
 class SensevoiceASR:
-    def __init__(self, language="auto"):
+    def __init__(self, language="auto", device="cpu"):
         from funasr import AutoModel
         from funasr.utils.postprocess_utils import rich_transcription_postprocess
 
         model_dir = "iic/SenseVoiceSmall"
+        self.device = "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
 
         self.sensevoice_model = AutoModel(
             model=model_dir,
             trust_remote_code=False,
-            device=f"cuda",
+            device=self.device,
             disable_pbar=True,
             disable_update=True,
         )

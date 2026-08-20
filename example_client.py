@@ -57,6 +57,14 @@ class TurnTaking:
         elif data["state"]["state"] == "speak":
             print(f"User finished speaking, taking turn")
             print(f"User transcription: {data['state'].get('text', '')}")
+        elif data["state"]["state"] == "backchannel":
+            print("Backchannel detected")
+            print(f"[ASR of last 3.2s]: {data['state'].get('asr_buffer', '')}")
+            print(f"[ASR of current chunk]: {data['state'].get('asr_segment', '')}")
+        elif data["state"]["state"] == "incomplete":
+            print("User has not finished speaking, keep waiting")
+            print(f"[ASR of last 3.2s]: {data['state'].get('asr_buffer', '')}")
+            print(f"[ASR of current chunk]: {data['state'].get('asr_segment', '')}")
         elif data["state"]["state"] == "blank":
             print(
                 "Accumulated unprocessed audio less than one chunk (160ms), wait for next request"
