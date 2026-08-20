@@ -24,9 +24,13 @@ sessions: Dict[str, TurnSession] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("[TurnTaking] loading model ...")
-    app.state.model = load_turn_model(
-        config_path=os.path.join(os.path.dirname(__file__), "config/config.yaml")
-    )
+    default_config_path = os.path.join(os.path.dirname(__file__), "config/config.yaml")
+    config_path = os.environ.get("SOULX_CONFIG_PATH", default_config_path)
+    if not os.path.isabs(config_path):
+        config_path = os.path.abspath(config_path)
+
+    print(f"[TurnTaking] config path: {config_path}")
+    app.state.model = load_turn_model(config_path=config_path)
     print("[TurnTaking] model loaded")
 
     gc_task = asyncio.create_task(session_gc_loop())
